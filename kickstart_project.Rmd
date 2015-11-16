@@ -1,0 +1,1117 @@
+---
+title: "Kickstarter projects data exploration"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+    theme: united
+---
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, packages}
+# Load all of the packages that you end up using
+# in your analysis in this code chunk.
+
+# Notice that the parameter "echo" was set to FALSE for this code chunk.
+# This prevents the code from displaying in the knitted HTML output.
+# You should set echo=FALSE for all code chunks in your file.
+
+
+
+library(ggplot2)
+library(gridExtra)
+library('dplyr')
+library(reshape2)
+library(GGally)
+library(colorspace)
+library(memisc)
+
+green <- '#2ca25f'
+options("scipen"=100)
+
+# Add a new level to a factor feature
+addLevel <- function(x, newlevel=NULL){ 
+  if(is.factor(x)) 
+    return(factor(x, levels=c(levels(x), newlevel))) 
+  return(x)
+  } 
+
+# Set days of dates to 1, allows to group by months/year
+# from 
+# http://stackoverflow.com/questions/6052631/aggregate-daily-data-to-month-year-in-r
+monyr <- function(x)
+{ x <- as.POSIXlt(x)
+    x$mday <- 1
+    as.Date(x)}
+
+#Set year and day to fixed values to group by months
+mon <- function(x)
+{
+    x <- as.POSIXlt(x)
+    x$mday <- 1
+    x$year <- 14
+    as.Date(x)
+}
+
+# Set days and month of dates to 1 and 0, allows to group by years
+yr <- function(x)
+{
+    x <- as.POSIXlt(x)
+    x$mday <- 1
+    x$mon <- 0
+    as.Date(x)
+}
+
+
+# Remove missing levels
+reset_lvl <- function(x)
+  {
+  x <- factor(x, as.character(x))
+  return(x)
+  }
+
+get_success_rate <- function(x)
+  {
+  x <- with(x, successful/(successful+failed))
+  return(x)
+  }
+
+# Retrieve the lower level of each bucket of a cutted feature
+get_bucket_numeric <- function(x)
+  {
+  return (as.numeric( sub("\\((.+),.*", "\\1", x) ))
+  }
+
+```
+
+
+```{r Load_data, echo=FALSE, cache=TRUE, cache.path = 'cache/', fig.path='figure/'}
+# Load the Data
+ks = read.csv('data.csv')
+```
+
+
+
+```{r Some_data_wrangling_new_variables, echo=FALSE, cache.path = 'cache/', fig.path='figure/'}
+# Lets ignore live projects
+ks <- subset(ks, state != 'live')
+
+# Create variables to group projects by 
+# launch-month/year/weekday / deadline weekday
+ks$launched_at_month <- monyr(ks$launched_at)
+ks$launched_at_year <- yr(ks$launched_at)
+ks$launched_weekday <- strftime(ks$launched_at, format='%a')
+ks$deadline_weekday <- strftime(ks$deadline, format='%a')
+```
+
+
+# Introduction
+
+This project explores a dataset of >150000 [Kickstarter][kickstarter] projects. Probably the most popular crowdfunding site. The dataset was obtained by querying directly the (undocumented) kickstarter API.The dataset contains information the project goal, the outcome (successfull, failed, how much was in the end pledged for, backers count), project location, the category, when it was created and also some extra information about the creator for a part of the projects. Can we use all this information to understand the recipe for a successful project?
+
+First, let's take a look at some basic statistics / numbers about the dataset.
+
+Features in the dataset:
+
+```{r echo=FALSE}
+names(ks)
+```
+
+There are **`r length(ks$state)`** projects in the dataset. These projects are distributed
+among **successful* and **not successful** projects like:
+
+```{r echo=FALSE}
+summary(ks$state)
+```
+
+The top 10 categories of projects are:
+
+```{r echo=FALSE, Summary_of_top_10}
+summary(ks$category_parent)[1:10]
+```
+
+And the top 10 countries where the projects are located in:
+
+```{r, echo=FALSE}
+summary(ks$location_country)[1:10]
+```
+
+# Plots
+
+## Project states
+How many project are successful, how many failed?
+
+```{r state_hist, echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=state), data=ks) + geom_histogram(fill=green)
+```
+
+There are five states: successful, failed, canceled, suspended and live.
+For the rest of this analysis, let's focus on successful and for whatever
+reason unsuccessful projects. Thus we wrap up failed, canceled and suspended into
+a new variable 'unsuccessful'.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# get rid of live, suspended and canceled projects
+ks <- filter(ks, !(state %in%  c('live','suspended','canceled')))
+
+ks$state <-factor(ks$state)
+summary(ks$state)
+```
+
+## Distribution of projects by location
+
+From which country are most projects coming from?
+
+```{r location_hist,  echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=country), data=ks) + 
+  geom_histogram(fill=green) +
+  scale_y_log10()
+```
+
+By a large margin the most projects come from the USA. Let's check how they are distributed within the USA:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+by_name_usa <-filter(ks, (location_country =='US') & 
+                    (!is.na(location_name))) %>%
+            group_by(location_name) %>%
+            summarise(n = n()) %>%
+            filter(n>500) %>%   # only places with more than 500 projects
+            arrange(n)        # sort by number of projects
+
+# if we don't do this step, the plot is not sorted by # of projects..
+by_name_usa$location_name <- reset_lvl(by_name_usa$location_name)
+ggplot(aes(x=location_name, y=n), data=by_name_usa) + 
+  geom_bar(stat='identity', fill=green) + 
+  theme(axis.title.y =element_blank())+
+  ylab('Number of projects') + 
+  coord_flip() 
+  
+```
+
+Most projects come from Los Angeles. However if we add Brooklyn to New York, New York actually wins by a large margin. Third and fourth place go to Chicago and San Francisco, each with less than half the projects from LA. 
+
+Lets fix Brooklyn and New York
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ks[ks$location_name=='Brooklyn','location_name'] <- 'New York'
+```
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+by_name_usa <-subset(ks, (ks$location_country =='US') & 
+                    (!is.na(ks$location_name))) %>%
+            group_by(location_name) %>%
+            summarise(n = n()) %>%
+            filter(n>500) %>%
+            arrange(n)
+
+by_name_usa$location_name <- reset_lvl(by_name_usa$location_name)
+ggplot(aes(x=location_name, y=n), data=by_name_usa) + 
+  geom_bar(stat='identity', fill=green) + 
+  theme(axis.title.y =element_blank())+
+  ylab('Number of projects') + 
+  coord_flip() 
+```
+
+
+## Project sizes
+### Project size distribution and project pledged for distribution
+
+Let's look at the distribution of project **goals** and what people actually
+**pledged** for:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- ggplot(aes(x=usd_goal), data=subset(ks, usd_goal < 100000)) + 
+  geom_histogram(binwidth = 1000, fill=green) +
+    xlab('Project goals (USD)')
+p2 <- ggplot(aes(x=usd_pledged), data=subset(ks, usd_pledged < 100000)) + 
+  geom_histogram(binwidth = 1000, fill=green) +
+  xlab('Pledged for (USD)')
+
+grid.arrange(p1,p2,ncol=1)
+```
+```{r}
+summary(ks$usd_goal)
+```
+```{r}
+summary(ks$usd_pledged)
+```
+
+Most of the projects have a **goal** of less than $5000. The goals histogram shows discrete jumps, round values for the goals are preferred over random goals. Both distributions look similar to an exponential distribution, with the **pledged** distribution dropping faster from zero, most projects receive less than $1300.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- ggplot(aes(x=usd_goal), data=subset(ks, usd_goal < 100000)) + 
+  geom_histogram(binwidth = 1000, fill=green) +
+    xlab('Goal (USD)') + scale_y_log10()
+
+p2 <- ggplot(aes(x=usd_pledged), data=subset(ks, usd_pledged < 100000)) + 
+  geom_histogram(binwidth = 1000, fill=green) +
+  xlab('Pledged (USD)') + 
+  scale_y_log10()
+
+grid.arrange(p1,p2,ncol=1)
+```
+
+If we switch to a logarithmic scale, the two distributions look more linear. The pledged for distribution also shows discrete jumps at round values, presumably those are **successful** projects that just reached their goal. 
+
+Let's create a new variable: percentage of goal achieved. This allows us to compare projects of different sizes. We divide **pledged** by **goal** and multiply it by 100 to get percentage of the project goal reached.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ks$goal_reached = 100*(ks$pledged/ks$goal)
+```
+
+and it's distribution looks like:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=goal_reached), data=subset(ks, 
+    ks$goal_reached < quantile(ks$goal_reached, 0.99))) +
+    geom_histogram(binwidth=10, fill=green) +
+    xlab('Percentage of goal reached') 
+```
+
+Clearly we are looking here at the superposition of two distributions that both look like they are very close to an exponential distribution.  
+
+This is the superposition of **successful** and **failed** projects. Projects that reach 100% become successful. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=goal_reached, fill=state), data=subset(ks, 
+    ks$goal_reached < quantile(ks$goal_reached, 0.99))) +
+    geom_histogram(binwidth=10) +
+    xlab('Percentage of goal reached') 
+```
+
+```{r}
+summary(filter(ks, state=='successful')$goal_reached)
+```
+```{r}
+summary(filter(ks, state=='failed')$goal_reached)
+```
+
+Most of the failed projects raised pretty much nothing. The lack of projects between 50% and 100% is somewhat surprising. Apparently, projects that made it so far have enough momentum not to fail.
+
+The feature **backers_count** tells us how many people pledged money for a project.
+Let's take a look at it's distribution:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=backers_count), data=ks) + xlim(0, 1000) + 
+  geom_histogram(binwidth=5, fill=green)
+```
+
+```{r}
+summary(ks$backers_count)
+```
+
+Again we find an exponential like, very narrow, distribution. Most projects have less than 23 backers,
+and the likelyhood to receive more than 100 backers are pretty slim.
+
+Let's create a new feature: the amount pledged per individual backer. We divide the amount **pledged** per project by the **backers count**.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# If no backer, zero $ were pledged per backer
+ks$pledged_backer <- ifelse(ks$backers_count!=0, 
+                 ks$pledged/ks$backers_count, 0) 
+
+```
+
+and it's distribution looks like:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=pledged_backer), data=ks) + xlim(0, 500) + 
+  geom_histogram(binwidth=5, fill=green)
+```
+```{r}
+summary(ks$pledged_backer)
+```
+
+Most get around $45 per backer. The distribution is rather narrow, the money that individual backers are willing to pledge doesn't vary too much.
+
+We can split the histogram up by successful / failed projects:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+ggplot(aes(x=pledged_backer, fill=state), data=ks) + 
+  geom_histogram(binwidth=10) +
+  xlim(0, 750)
+```
+
+It looks like two log-normal distributions, but the failed projects have a peak for very low amounts pledged per backer.
+
+Let's check if it's log-normal by plotting the histogram of the *log* of **pledged_backer**.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+ggplot(aes(x=log(pledged_backer), fill=state), data=ks) + 
+  geom_histogram(binwidth=0.1) +
+  xlim(0, 8)
+```
+
+This looks very much like two normal distributions.
+
+We should also normalize the amount pledged per backer. I.e., what fraction of the goal is pledged per backer?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# no division by 0!
+ks$pledged_backer_pct <- 
+  ifelse(ks$pledged_backer!=0, 100*ks$pledged_backer/ks$goal, 0) 
+
+ggplot(aes(x=pledged_backer_pct), data=ks) + xlim(0, 20) + 
+  geom_histogram(binwidth=0.5, fill=green)+
+  xlab('% pledged by each backer')
+```
+```{r}
+summary(ks$pledged_backer_pct)
+```
+
+Again an exponential distribution, each backer usually contributes only with a small fraction to the projects goal. Typically less than 1%.
+
+## Project categories
+Let's take a look at the different **categories** we have in the dataset.
+
+Which categories for projects are there and how many projects do they have?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=category_parent), data=ks) + geom_histogram(fill=green) +
+  theme(axis.text.x  = element_text(angle=45,hjust = 1.0,  
+                                    size=10, colour = 'black'))
+```
+
+So most projects are of the categories **music**, **film&video** and **publishing**.
+
+## The creators
+
+There are three variables that describe the experience of the creators: **creator.total_experience**,  **creator.successful_experience** and **creator.failed_experience**. Each variable describes how many projects a creator had *before* this project: in *total*, *successful* and *failed*. 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+p1 <- ggplot(aes(x=creator.total_experience), data=ks) + 
+  xlim(0,40)+   # Everyone has created at least one project
+  geom_histogram(binwidth=1, fill=green) + 
+  scale_y_log10()
+p2 <- ggplot(aes(x=creator.successful_experience), data=ks) +
+  xlim(0,40) +
+  geom_histogram(binwidth=1, fill=green)+
+  scale_y_log10()
+p3 <- ggplot(aes(x=creator.failed_experience), data=ks) +
+  xlim(0,40) +
+  geom_histogram(binwidth=1, fill=green)+
+  scale_y_log10()
+
+grid.arrange(p1,p2,p3,nrow=3)
+
+```
+```{r}
+summary(ks$creator.total_experience)
+```
+```{r}
+summary(ks$creator.successful_experience)
+```
+```{r}
+summary(ks$creator.failed_experience)
+```
+
+Again three exponential like distributions. Creators with lots of failed projects are rather rare, much rarer than creators with lots of successful projects. In generell most creators created only one project on Kickstarter.
+
+## Projects timeframe
+
+How long does a Kickstarter campaign usually last? 
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Need to make a new variable, difference 
+# between launched date and deadline date
+ks$project_timeframe <- as.numeric(as.Date(ks$deadline) - 
+                                     as.Date(ks$launched_at))
+
+ggplot(aes(x=project_timeframe), data=ks) + 
+  geom_histogram(binwidth=1, fill=green)+
+              xlim(0,70) + xlab('Project timeframe in days')
+```
+
+Most campaigns have a timeframe of a month (30 days), while some are extremely short (a few days), other campaigns take two months or longer.
+
+
+## Projects over time
+
+Let's look at the number of projects / month over the course of the
+last years.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# dplyr group by
+by_month <- ks %>%
+  group_by(launched_at_month) %>%
+  summarise(n = n()) %>%
+  filter(launched_at_month < '2015-04-01') 
+# remove the last two  months, they are not complete
+
+ggplot(aes(x=launched_at_month, y=n), 
+       data=by_month) +
+  geom_point(color=green) + 
+  geom_line(color=green) +
+  xlab('Date')+
+  ylab('Number of projects')+
+  geom_smooth(color='red')
+```
+
+Looks like a pretty steady growth. Two interesting features are, a sharp rise in the number of projects in July 2014, and a recurring drop in number of projects around November/December of each year.
+
+
+## The relationship between the project goal and the amount pledged
+Let's start by looking at a scatterplot of the **goal** vs. **goal_reached**. Are there
+any relationships?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=usd_goal, y=goal_reached), data=ks) + 
+  geom_point(alpha=1/10, aes(color=state)) +
+xlim(limits=c(0,quantile(ks$usd_goal, 0.99)))+
+ylim(limits=c(0,200)) + geom_smooth(color='black')
+```
+
+Ok, that's a mess. Though, it looks like there is a trend, that projects with larger goals tend to raise proportionally less of their goal. However, before we draw conclusions we should first check the relationship between project size and associated **success rate**.
+
+## The relationship between project size and success rate
+
+My intuition tells me, that project **goal** and **success rate** (Number of successful projects / Number of projects for each goal bucket) need to be related.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# Let's sort the goals into buckets, each $5000 big
+ks$goal.bucket = cut(ks$usd_goal, seq(0,quantile(ks$usd_goal, 0.99),5000))
+
+# Group by the projects by this goal bucket and count
+by_goal <- ks %>% group_by(goal.bucket, state) %>%
+          summarise(n = n())
+
+# get numeric values for the goal buckets back and add half the step size to
+# get the center of the bucket
+by_goal$goal.bucket <- get_bucket_numeric(by_goal$goal.bucket) + 2500
+
+# Cast the df back to calculate the success rate
+by_goal <-  dcast(by_goal, goal.bucket ~ state)
+
+# Calculate success rate
+by_goal$success_rate <- get_success_rate(by_goal)
+
+ggplot(aes(x=goal.bucket, y=success_rate), data=by_goal)+
+      geom_point(size=7, color=green, alpha=0.7) +
+      geom_line(size=1.5, color=green, alpha=0.7) +
+      geom_smooth() + xlab('Project goal (USD)')
+
+```
+
+That looks like a clear relationship. Smaller project goal, higher success rates. Larger projects (>~$100 000) settle at success rates around 15%. Let's try to model this relationship.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+m1 <- lm(formula = 1/I(success_rate) ~ I(goal.bucket), data=by_goal)
+by_goal$predict <- as.numeric(predict(m1, 
+          newdata=data.frame(goal.bucket=by_goal$goal.bucket)))
+
+ggplot(aes(x=goal.bucket, y=success_rate), data=by_goal)+
+      geom_point(size=7, color=green, alpha=0.7) +
+      geom_line(size=1.5, color=green, alpha=0.7) +
+    geom_line(aes(x=goal.bucket, y=1/predict), data=by_goal,
+              color='red')
+mtable(m1)
+```
+
+That looks like a good fit. Success rate and goal are inversely related.
+
+## Experience of the creator 
+
+Let's check if the experience of the creator of a project (**creator.total_experience**) has any influence on the amount of money pledged. Note, at the time a project was actually created, the numbers may have been different, we can not see the number of projects created by a person by *that* time.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=creator.total_experience, y=goal_reached, color=state), 
+       data=ks) + 
+  geom_point(alpha=0.5) +
+  xlim(c(0,100)) + 
+  ylim(0, 250) + 
+  geom_smooth(color='red')+
+  xlab('Projects created by the creator')
+```
+
+Hard to say from this plot. We will have to make buckets again and check the success rates like before!
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+ks$creator.total_experience.bucket <- cut(ks$creator.total_experience, 
+                                 seq(0,24,2))
+
+
+# We group by the projects by the bucket and count failed / successful projects
+by_creator <- ks %>% group_by(creator.total_experience.bucket, state) %>%
+          summarise(n = n())
+
+# get numeric values for the creator_created buckets back
+by_creator$creator.total_experience.bucket <- 
+              get_bucket_numeric(by_creator$creator.total_experience.bucket)
+
+# Cast the df back to calculate the success rate
+by_creator <- dcast(by_creator, creator.total_experience.bucket ~ state)
+by_creator <- by_creator[1:length(by_creator$failed)-1, ]
+by_creator <- replace(by_creator, is.na(by_creator), 0)
+by_creator$success_rate <- get_success_rate(by_creator)
+
+ggplot(aes(x=creator.total_experience.bucket, y=success_rate), 
+       data=by_creator) + 
+  geom_point() +
+  geom_smooth(span=1)+
+  xlim(0,30)+
+  xlab('Projects created by the creator')
+```
+
+This looks like a very clear relationship: experience pays off. Each project that a creator had before (at this point ignoring how many were successful or not), the success rate increases significantly. 
+
+
+Theory: creators with lots of experience have had mostly successful projects, while creators with failing projects disappear fast.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+by_creator <- ks %>% group_by(creator.total_experience) %>%
+              summarise(successful_mean = mean(creator.successful_experience),
+                        successful_var = var(creator.successful_experience),
+                        failed_mean = mean(creator.failed_experience))
+
+by_creator <- melt(by_creator, id.vars = 'creator.total_experience', 
+                   measure.vars=c('successful_mean','failed_mean'),
+                   value.name = 'mean_count')
+ggplot(aes(x=creator.total_experience, y=mean_count, color=variable), 
+       data=by_creator) + 
+  geom_point() + 
+  geom_abline(intercept=0, slope=1, linetype=2)+
+  xlab('Projects created by the creator')
+```
+
+So the total # projects by each creator and the # of successful projects form almost a straight line. People with lots of projects tend to have these from successful projects.
+
+Since we already found experienced creators have a higher success rate, this is probably not too surprising.
+
+## Success rates depending on the category
+
+Let's look at the influence of the category on the success of projects next. How many successful projects were in each category?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 8,  fig.height=6}
+by_category_state <- ks %>% group_by(category_parent,state) %>%
+              summarise(n = n()) 
+
+ggplot(aes(x=state, y=n, fill=state), data=by_category_state) + 
+  geom_bar(stat='identity') +
+  facet_wrap(~category_parent, scale='free_y') +
+  theme(axis.text.x  = element_text(angle=45,hjust = 1.0,  
+                                    size=10, colour = 'black'))
+```
+
+So crafts, journalism and technology are not doing very well, while theater and design projects have the highest success rates.
+
+How did the different categories change over time? Did some become more popular?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 8,  fig.height=6}
+# Group by month launched and category
+by_month_category <- ks %>% group_by(category_parent, launched_at_month) %>%
+                    summarise(n=n()) %>%
+                    filter(launched_at_month < '2015-04-01')
+                  
+ggplot(aes(x=launched_at_month, y=n), data=by_month_category) + 
+  geom_line(color=green) + 
+  geom_point(color=green)+
+  geom_smooth(color='black', method='loess')+
+  facet_wrap(~category_parent, scales = 'free_y')+
+  theme(axis.text.x  = element_text(angle=45,hjust = 1.0,  
+                                    size=10, colour = 'black'))
+```
+
+Some categories show very strong seasonal fluctuations, especially **theater** and **art** projects. All categories show growth, which is reflecting the overall growth of Kickstarter. Some categories see sharp spikes in the number of projects in mid 2014, mostly **technology**, **journalism**, **crafts**, **photography** and **food**. 
+
+
+## Success rates over time
+
+Let's see how the success rate of projects changed over time
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# group by month launched and project state
+by_month <- ks %>%
+  group_by(launched_at_month, state) %>%
+  summarise(n = n()) %>%
+  filter(launched_at_month < '2015-04-01') 
+# remove the last two  months, they are not complete
+
+by_month <- dcast(by_month, launched_at_month ~ state)
+
+by_month$success_rate <- get_success_rate(by_month)
+
+ggplot(aes(x=launched_at_month, y=success_rate), 
+  data=by_month) +
+  geom_point(color=green, size=5, alpha=0.7) + 
+  geom_line(color=green, size=1.5, alpha=0.7) +
+  xlab('Date') +
+  ylab('Number of projects') +
+  geom_smooth(span=1, method='loess')
+```
+
+So there was a sudden drop in the success rate early 2014 with a cross over around spring 2014. From this point on there were more failed projects than successful ones (success rate < 0.5). 
+
+Let's see next how the total amount of money **pledged** varied over the same time.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+by_month <- ks %>%
+  group_by(launched_at_month, state) %>%
+  summarise(n = n(),
+            pledged = sum(usd_pledged)) %>%
+  filter(launched_at_month< '2015-04-01') 
+# remove the last two  months, they are not complete
+
+ggplot(aes(x=launched_at_month, y=pledged, color=state), 
+       data=by_month) +
+  geom_point() + 
+  geom_line() +
+  xlab('Date')+
+  ylab('Money pledged')+
+  geom_smooth(span=0.5, method='loess')
+```
+
+There are many failed projects, but they hardly receive any money. The successful projects generate more and more money. The seasonal fluctuations are again very obvious. 
+
+One question remains: does each individual project on average receive more or less money over the last years?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# dplyr group by
+ggplot(aes(x=launched_at_month, y=pledged/n, color=state), 
+       data=by_month) +
+  geom_point() + 
+  geom_line() +
+  xlab('Date')+
+  ylab('Money pledged per project')+
+  geom_smooth(span=0.2, method='loess')
+```
+
+So the money **pledged per project** did rise sharply from 2011 to 2013, and is somewhat constant at a little over $20k since then.
+
+Did the amount that each individual backer pledged change over the same time?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+by_month <- filter(ks, !is.na(pledged_backer)) %>%
+  group_by(launched_at_month) %>%
+  summarise(pledged = mean(pledged_backer),
+            n = n()) %>%
+  filter(launched_at_month< '2015-04-01') 
+# remove the last two  months, they are not complete
+
+ggplot(aes(x=launched_at_month, y=pledged), data=by_month) + 
+  geom_point(color=green) + 
+  geom_line(color=green) +
+  geom_smooth(span=2, method='loess')
+```
+
+That's interesting, the mean amount pledged per backer is very steady
+at around $74.
+
+## Project timeframes over time
+
+Did project campaigns become longer / shorter?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+by_month_timeframe <- ks %>%
+              group_by(launched_at_month, state) %>%
+              summarise(mean_timeframe = mean(project_timeframe)) %>%
+              filter(launched_at_month < "2015-04-01")
+
+ggplot(aes(x=launched_at_month, y=mean_timeframe, color=state), 
+       data=by_month_timeframe) +
+        geom_point() + 
+        geom_line() +
+        geom_smooth(span=0.5, method='loess')
+```
+
+Projects become shorter, from > 1.5 months down to one month. Throughout Kickstarter history successful projects tended to be shorter. 
+
+# Preliminary conclusions
+
+The success rate of the projects depends inversely on the project goal. The bigger a project, the less likely will it get funded - for larger projects it's getting harder to get enough momentum to raise the money.
+We also found positive correlations between the experience of creators and the outcome. The more projects a creator already created, the higher the probability for a successful project. Presumably, this is experience plus successful creators will tend to stick around.
+The success rate of projects dropped sharply early 2014 below 50% - more projects fail since then than succeed.
+
+The strongest relationship was probably between the **category** of a project and the success rate. **Theater** projects, for example, are incredible successful. My guess is, that they are rather small and hit a certain established fan base. **Craft** projects on the other are not very successful, though they should also be small. My guess is, that it is more difficult to establish a fan base. We could investigate further what differs theater from craft projects, e.g. by analysing the mean project size for successful / failed projects. Especially since we also found a large influence of goal on the success rate.
+
+
+# And more plots
+Let's check the influnce of project size on success rate split up by project category.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width= 8,  fig.height=6}
+# Make a new goal bucket covering a smaller goal range
+ks$goal.bucket = cut(ks$usd_goal, seq(0,quantile(ks$usd_goal, 0.95),5000))
+
+# Group by the projects by the goal bucket, state and category and count
+by_goal_cat <- ks %>% group_by(goal.bucket, state, category_parent) %>%
+          summarise(n = n())
+
+# get numeric values for the goal buckets back
+by_goal_cat$goal.bucket <- get_bucket_numeric(by_goal_cat$goal.bucket)
+
+# Cast the df back to calculate the success rate
+by_goal_cat <-  dcast(by_goal_cat, goal.bucket + category_parent ~ state)
+
+# Get the success rate
+by_goal_cat$success_rate <- get_success_rate(by_goal_cat)
+
+ggplot(aes(x=goal.bucket, y=success_rate, color=category_parent), 
+       data=by_goal_cat)+
+      ylim(0,1)+
+      geom_point(size=3, alpha=0.7, na.rm=TRUE) +
+      geom_line(size=.5, alpha=0.7, na.rm=TRUE) +
+      geom_smooth(method='loess', na.rm=TRUE) + 
+      xlab('Project goal (USD)') +
+      facet_wrap(~category_parent) +
+      theme(axis.text.x  = element_text(angle=45,hjust = 1.0,  
+                                    size=10, colour = 'black'))
+```
+
+Some project categories are more resilient when it comes to goal size, e.g. **technology**, **design** or **journalism**. Other categories (**music**, **art** or **food**) have a success rate that depends stronger on goal size.
+
+
+## Project success rates over time by category
+
+Let's check how the number of failed / successful projects changed over the last years broken down to the categories.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+# Group by the category, state and the launch year
+by_year_category <- ks %>% 
+              group_by(category_parent, launched_at_year, state) %>%
+              summarise(n=n()) %>%
+              filter(launched_at_year < '2015-01-01')
+
+ggplot(aes(x=launched_at_year, y=n, color=state),
+       data=by_year_category) + 
+  geom_line(alpha=0.8) + 
+  geom_point(size=3, alpha=0.8)+
+  scale_color_discrete() +
+  facet_wrap(~category_parent, scales='free_y') +
+  theme(axis.text.x  = element_text(angle=45,hjust = 1.0,  
+                                    size=10, colour = 'black'))
+```
+
+So the hype in mid 2014 affected only unsuccessful projects, there was basically no increase in successful projects! Also only some categories were affected: **technology**, **journalism**, **photography**, **crafts** and **fashion**.
+ 
+Let's look at the change of success rates over time:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+# Group by the category, state and the launch year
+by_year_category <- ks %>% 
+              group_by(category_parent, launched_at_year, state) %>%
+              summarise(n=n()) %>%
+              filter(launched_at_year < '2015-01-01') # last year is incomplete
+
+# Cast the df back to calculate the success rate
+by_year_category <- dcast(by_year_category, launched_at_year +
+                             category_parent ~ state)
+by_year_category <- replace(by_year_category, is.na(by_year_category), 0)
+# some categories have no failed projects, at least in the data!
+
+# Calculate the success rate
+by_year_category$success_rate <- get_success_rate(by_year_category)
+
+ggplot(aes(x=launched_at_year, y=success_rate, color=category_parent),
+       data=by_year_category) + 
+  geom_line(alpha=0.8) + 
+  geom_point(size=3, alpha=0.8) +
+  ylim(0,1) +
+  facet_wrap(~category_parent) +
+  theme(axis.text.x  = element_text(angle=45,hjust = 1.0,  
+                                    size=10, colour = 'black'))
+```
+
+Success rates were generally going down from 2013 to 2014 across almost all categories. Some categories have no failed projects over long stretches (**theater**, **food**). This has to be data missing in the dataset and explains the high success rates for these categories!
+
+## How much money was *successfully* raised over the last years?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+# Group by the category, state and the launch year, calculate the total
+# amount pledged
+by_year_category <- filter(ks, state=='successful') %>%
+                    group_by(category_parent, launched_at_year) %>%
+                    summarise(n=n(), pledged_sum = sum(usd_pledged)) %>%
+                    filter(launched_at_year < '2015-01-01') 
+# last year is incomplete
+
+ggplot(aes(x=launched_at_year, y=pledged_sum, 
+           color=category_parent), data=by_year_category) + 
+  geom_line(alpha=0.8) + 
+  geom_point(size=2, alpha=0.5) +
+  scale_y_log10() +
+  facet_wrap(~category_parent) +
+  theme(axis.text.x  = element_text(angle=45,hjust = 1.0,  
+                                    size=10, colour = 'black'))
+```
+
+The amout of money that was successfully raised did not go down, more to the opposite. **Technology**, **design** and **games** projects show perhaps the most steady recent growth in terms of money raised. Note the logarithmic y-scale!
+
+Before we found that the top 4 locations are: **New York**, **Los Angeles**, **San Francisco** and **Chicago**. Let's check how these four cities performed over the last years.
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+
+# Groub by the four top cities, state and year and count 
+by_month_cities <- filter(ks, location_name %in% c('New York', 'Los Angeles',
+      'San Francisco', 'Chicago')) %>%
+    group_by(location_name, state, launched_at_year) %>%
+    summarise(n = n()) %>%
+    filter(launched_at_year < '2015-01-01') # last year is incomplete
+
+# retrieve the success rate for each group
+by_month_cities <- 
+  dcast(by_month_cities, launched_at_year + location_name ~ state)
+by_month_cities$success_rate <- get_success_rate(by_month_cities)
+
+# Do the same to get the money pledged for each group
+by_month_cities_pledged <-
+    filter(ks, (location_name %in% c('New York', 'Los Angeles',
+      'San Francisco', 'Chicago')) & (state=='successful')) %>%
+      group_by(location_name, launched_at_year) %>%
+      summarise(pledged = sum(pledged)) %>%
+  filter(launched_at_year < '2015-01-01')
+
+# Merge both df back to one to plot the data
+by_month_cities <- merge(by_month_cities, by_month_cities_pledged)
+ggplot(aes(x=launched_at_year, y=success_rate, 
+           color=location_name, size=pledged), data=by_month_cities) + 
+  ylim(0,1) +
+  geom_point(alpha=0.5) + 
+  scale_size_area(max_size = 15 )+
+  geom_line(size=.5) + 
+  facet_wrap(~location_name) +
+  theme(axis.text.x  = element_text(angle=45,hjust = 1.0,  
+                                    size=10, colour = 'black'))
+```
+
+Very high success rates for all four cities, well above the average. Success rates in these places also didn't drop after 2014 as for the average! Looks like **Chicago** raises the least money of the four cities, and **San Francisco** most. This is probably due to more technology projects in SF.
+
+We should also look at the amount raised per successful project:
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+ggplot(aes(x=launched_at_year, y=pledged/successful, 
+      color=location_name), data=by_month_cities) + 
+  #ylim(0,1) +
+  geom_point(alpha=0.5, size=5) + 
+  geom_line(size=.5) 
+```
+
+Projects based in **San Francisco** become on average way bigger than in the three other cities and reached around $60000 per successful project!
+
+## Influence of experience on success rate depending on category
+
+By number of projects **created** by creator and facetted by category:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+
+# group by creator_created.bucket and category and count
+by_creator <- ks %>% group_by(creator.total_experience, 
+                                       category_parent, state) %>%
+                            summarise(n = n())
+
+# Convert the bucket back to numeric values, calculate success rate per group
+by_creator$creator.total_experience <- 
+                  get_bucket_numeric(by_creator$creator.total_experience)
+by_creator <- 
+  dcast(by_creator, creator.total_experience + category_parent ~ state)
+by_creator$success_rate = get_success_rate(by_creator)
+
+ggplot(aes(x=creator.total_experience, y=success_rate), data=by_creator) + 
+  geom_point(color=green) +
+  geom_smooth(span=1, method='loess')+
+  ylim(0,1) +
+  xlim(0,20) +
+  xlab('Projects backed by the creator') +
+  facet_wrap(~category_parent, scales='free_y')
+
+```
+
+There is not a lot of data, but there seem to be some trends. **Games** projects profit from more engaged creators, as do **publishing** or **comics** projects. **Music** projects on the other hand don't really. 
+
+## Are shorter projects less / more successful?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, fig.width=8, fig.height=6}
+
+# Make a bucket for project timeframe and group by that + category and count
+ks$timeframe.bucket <- cut(ks$project_timeframe, seq(0,75,5))
+by_timeframe <- ks %>% group_by(timeframe.bucket,category_parent, state) %>%
+              summarise(n=n())
+
+by_timeframe$timeframe.bucket <- 
+  get_bucket_numeric(by_timeframe$timeframe.bucket)
+by_timeframe <- dcast(by_timeframe, timeframe.bucket + category_parent ~ state)
+by_timeframe$success_rate <- get_success_rate(by_timeframe)
+ggplot(aes(x=timeframe.bucket, y=success_rate, color=category_parent), 
+       data=by_timeframe) + 
+  geom_point(alpha=.8, size=3) + 
+  geom_smooth(method='loess') +
+  facet_wrap(~category_parent)
+```
+
+For most categories, that's a clear trend. Success rates are slightly higher when they have short timeframes, longer projects are less successful. This is especially true for projects from the categories **games** and **comics**.
+
+
+## How much is pledged in % of the goal depending on the timeframe of the projects?
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# group by timeframe and calculate some statistics
+by_timeframe <- ks %>% group_by(timeframe.bucket) %>%
+            summarise(pledged_backer_pct = median(pledged_backer_pct),
+                      median_goal = median(goal),
+                      mean_goal_reached = mean(goal_reached),
+                      n=n())
+
+by_timeframe$timeframe.bucket <- 
+  get_bucket_numeric(by_timeframe$timeframe.bucket)
+
+ggplot(aes(x=timeframe.bucket, y=pledged_backer_pct), data=by_timeframe) + 
+      geom_point(aes(size=median_goal), alpha=1., color=green, na.rm=TRUE) + 
+      geom_smooth(span=1, method='loess', na.rm=TRUE)
+```
+
+The longer the project, the smaller the relative contribution by each backer. Also, the project's goals increases with longer campaigns:
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(x=timeframe.bucket, y=median_goal), data=by_timeframe) + 
+      geom_point(aes(size=pledged_backer_pct), alpha=1., color=green) + 
+      geom_smooth(span=1)
+```
+
+
+Let's plot relative amount pledged versus goal:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+ggplot(aes(y=pledged_backer_pct, x=median_goal, 
+      size=mean_goal_reached), data=by_timeframe) + 
+      geom_point(alpha=1., color=green)
+```
+
+The **goal** and the **relative amount pledged per backer** are inveresely related: The higher the goal, the smaller the contribution by each backer, i.e. the amount pledged by each backer is more or less constant. Let's model this:
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+m2 <- lm(weights = n, 
+      formula = 1/I(pledged_backer_pct) ~ I(median_goal), data=by_timeframe)
+
+goals <- seq(1000, 7000, 100)
+prediction <- as.numeric(predict(m2, 
+          newdata=data.frame(median_goal=goals)))
+
+ggplot(aes(y=pledged_backer_pct, x=median_goal), data=by_timeframe) + 
+      geom_point(aes(size=mean_goal_reached), alpha=1., color=green) +
+    geom_line(aes(x=goals, y=1/prediction), data=data.frame(
+              median_goal=goals, prediction= prediction),
+              color='red',
+              size=1., alpha=0.5)
+
+mtable(m2)
+```
+
+Not a perfect fit, but reasonable: The bigger the goal the smaller the relative amount pledged per backer. 
+
+
+
+# Conclusions
+
+For some categories experience has influence on the success rates of projects. However, the data is not very complete and we don't have information about the creators for most projects. 
+We already found that the project size plays a role for the success rate. However, it's influence is also different for different categories. The success rate for projects from some categories (e.g. **music**) drops faster for larger goals than from other categories (e.g. **technology**).
+
+The amount pledged per backer is relatively independent on the goal of projects. I.e., the larger the goal of a project, the smaller the *relative* amount pledged by each backer. This may explain why larger projects fail more often: they need to convince more people to support them.
+
+I created two models with this dataset. The first model is the relationship between project goal size and success rate. I found that a simple model where the success rate is inversely proportional to the goal size describes the dataset very well. One limitation of this model is, that the success rate dropped over the last two years, while project goals became bigger. It might be appropriate to incorporate this into the model.
+
+The second model is again an inverse proportionality between project goal and relative amount pleged per backer. Basically, this means that the absolute amount that is pledged per backer is a relatively fixed quantity. Bigger projects need to find *more* backers that each contribute the same amount as they would for a smaller project.
+
+------
+
+# Final Plots and Summary
+
+## Plot One
+
+```{r final_plot_1, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, cache.path = 'cache/', fig.path='figure/'}
+# dplyr group by
+by_month <- ks %>%
+  group_by(launched_at_month, state) %>%
+  summarise(n = n()) %>%
+  filter(launched_at_month < '2015-04-01') 
+# remove the last two  months, they are not complete
+
+ggplot(aes(x=launched_at_month, color=state, y=n), 
+       data=by_month) +
+  geom_point() + 
+  geom_line() +
+  xlab('Date')+
+  ylab('Number of projects')+
+  ggtitle('Successful and failed projects launched per month') +
+  geom_smooth(method='loess', span=0.2)+
+  theme(legend.title=element_blank())
+```
+
+The number of successful and failed projects at Kickstarter launched each month over time. Kickstarter started around early 2009. Since that time, the number of projects each month has grown to over 5000. Of these, about 3000 projects failed and 2000 were successful. In the first years more projects were successful than failed, however in early 2014 the number of failed has risen sharply to a peak in July 2014. Since then, the failed projects are majority. 
+Seasonal fluctuations show up in the number of successful projects. Each November that number goes down and rises again in the next spring.
+
+## Plot Two
+
+```{r final_plot_2, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, cache.path = 'cache/', fig.path='figure/'}
+ggplot(aes(x=goal.bucket, y=success_rate), data=by_goal)+
+      geom_point(size=7, color=green, alpha=0.7, na.rm=TRUE) +
+      geom_line(size=1.5, color=green, alpha=0.7, na.rm=TRUE) + 
+      xlab('Project goal (USD)') +
+      ylab('Success rate of projects') +
+    geom_line(aes(x=goal.bucket, y=1/predict), data=by_goal,
+              color='red')+
+      ggtitle('Success rate versus project goals')
+```
+
+The success rate is defined as the number of successful projects divided by the total number of projects. All projects are grouped by their goal size in USD in buckets of each \$5000. Then the success rate of each group is calculated by counting the successful and failed projects. 
+Projects with smaller goals have a higher success rate, as projects become bigger the success rate drops. 
+The red line is a fit following a simple model, where success rate and goal size are inversely proportional ($goal \propto \frac{1}{success\_rate}$). This simple model seems to describe the underlying dynamics surprisingly well. 
+
+
+## Plot Three
+
+```{r final_plot_3, echo=FALSE, warning=FALSE, message=FALSE, cache=TRUE, cache.path = 'cache/', fig.path='figure/'}
+by_month_all <- ks %>%
+    group_by(state, launched_at_year) %>%
+    summarise(n = n()) %>%
+    filter(launched_at_year < '2015-01-01') # last year is incomplete
+
+# retrieve the success rate for each group
+by_month_all <- 
+  dcast(by_month_all, launched_at_year ~ state)
+by_month_all$success_rate <- get_success_rate(by_month_all)
+
+by_month_all$location_name <- factor('World')
+
+all_month_pledged <-
+filter(ks, state=='successful') %>%
+      group_by(launched_at_year) %>%
+      summarise(pledged = sum(pledged)) %>%
+  filter(launched_at_year < '2015-01-01')
+
+all_month_pledged$location_name <- factor('World')
+
+by_month_all <- merge(by_month_all, all_month_pledged)
+by_month_cities <- rbind(by_month_cities, by_month_all)
+ggplot(aes(x=launched_at_year, 
+      color=location_name, y=pledged/successful), data=by_month_cities) + 
+  geom_line(size=.5) +
+  xlab('Date') +
+  ggtitle('Amount pledged per successful project in top 4 cities')+
+  ylab('USD per project')+
+  geom_point(aes(x=launched_at_year, y=pledged/successful, 
+                 color=location_name, size=successful+failed), 
+            data=filter(by_month_cities, location_name!='World'),
+            alpha = 0.5)+
+  scale_size_area(max_size = 10)+
+  scale_color_brewer(type='div', palette='Set1') +
+  guides(size=guide_legend(title='# projects')) +
+  guides(color=guide_legend(title=NULL))
+```
+
+Most projects are located in four cities: **New York**, **Los Angeles**, **San Francisco** and **Chicago**. This plot analyses how much money is on average pledged per successful project in each of these cities over the last years. The orange line is the average for all projects in the dataset from the whole world. The size of each data point corresponds to the number of projects in that place in that year. Projects in **San Francisco** raise on average almost **3x** more than in the other 3 cities! And from the trend it looks like San Francisco is going to even increase this lead.
+
+------
+
+# Summary
+
+This dataset is definitely highly interesting and also very relevant. We got quite a lot of information about a huge amount of crowdsourcing projects located on Kickstarter. Even though the dataset is not 100% complete (for example projets from the theater category show an unreasonable success rate before 2012), we could still draw lots of valueable conclusion. The missing data is due to the fact that the Kickstarter API is not made for a study like this, and some workarounds are necessary to retrieve data about as many projects as possible. 
+
+The next step would be to predict for *live* projects whether they will *succeed - or not*. We found that the success rate is strongly affected by project goal size, location, category, campaign length and experience of the creator. With this information it should be possible to make reasonable predictions for the success of a live project.
+
+Probably the single most important insight is the overall growth of Kickstarter, though is maybe not too surprising given the recent hype of crowdfunding. However what might be surprising and also worrysome is the drop of the success rate early 2014. Even though the total money raised is still growing, a too large fraction of failed projects will be discouraging and frustrating for new members of the community. I believe Kickstarter should make sure that the quality of the projects stays high in the future.
+
+
+[kickstarter]: http://www.kickstarter.com "Kickstarter"
